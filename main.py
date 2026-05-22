@@ -14,6 +14,13 @@ TRAP_COOLDOWN_FRAMES = FPS * 5     # Spacebar: 5 seconds
 HAZARD_DURATION_FRAMES = FPS // 2  # Up Arrow hazard active: 0.5 seconds
 HAZARD_WIDTH = 75
 HAZARD_HEIGHT = 50
+SURVIVOR_BURST_CLOSE_RANGE = 120
+SURVIVOR_BURST_CHANCE = 0.5
+SURVIVOR_BURST_WINDUP_FRAMES = FPS * 2
+SURVIVOR_BURST_DURATION_FRAMES = FPS
+SURVIVOR_BURST_SIZE = 150
+SURVIVOR_BURST_COOLDOWN_FRAMES = FPS * 7
+PLAYER_STUN_FRAMES = FPS * 3
 
 # Colors (RGB)
 BG_COLOR = (30, 30, 30)
@@ -23,7 +30,11 @@ TRAPPED_COLOR = (180, 50, 255) # Trapped AI (Purple)
 BOX_COLOR = (200, 30, 30)       # Deep Red for Lingering Zone
 BOX_BORDER = (255, 100, 100)   # Light Red border for hazard visibility
 TRAP_PROJ_COLOR = (180, 50, 255)
+SURVIVOR_BURST_COLOR = (255, 180, 40)
+SURVIVOR_BURST_BORDER = (255, 230, 120)
+SURVIVOR_WINDUP_COLOR = (255, 120, 0)
 TEXT_COLOR = (255, 255, 255)
+STUNNED_PLAYER_COLOR = (160, 160, 160)
 
 # Setup Screen
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
@@ -98,6 +109,27 @@ class LingeringRectangle:
         return pygame.Rect(self.top_left_x, self.top_left_y, self.width, self.height)
 
 
+class SurvivorBurst:
+    """150x150 survivor counter-attack zone; stuns hunter for 3 seconds on hit."""
+    def __init__(self, center_x, center_y):
+        self.duration = SURVIVOR_BURST_DURATION_FRAMES
+        self.size = SURVIVOR_BURST_SIZE
+        half = self.size // 2
+        self.top_left_x = center_x - half
+        self.top_left_y = center_y - half
+
+    def update(self):
+        self.duration -= 1
+
+    def draw(self, surface):
+        rect = (int(self.top_left_x), int(self.top_left_y), self.size, self.size)
+        pygame.draw.rect(surface, SURVIVOR_BURST_COLOR, rect)
+        pygame.draw.rect(surface, SURVIVOR_BURST_BORDER, rect, 3)
+
+    def get_rect(self):
+        return pygame.Rect(self.top_left_x, self.top_left_y, self.size, self.size)
+
+
 class Character:
     """Base setup for entities"""
     def __init__(self, x, y, color, speed, radius=15):
@@ -119,14 +151,26 @@ class Player(Character):
         self.last_dy = -1  # Default direction is looking up
         self.hazard_cooldown = 0
         self.trap_cooldown = 0
+        self.stun_timer = 0
 
     def tick_cooldowns(self):
         if self.hazard_cooldown > 0:
             self.hazard_cooldown -= 1
         if self.trap_cooldown > 0:
             self.trap_cooldown -= 1
+        if self.stun_timer > 0:
+            self.stun_timer -= 1
+
+    def is_stunned(self):
+        return self.stun_timer > 0
+
+    def get_rect(self):
+        return pygame.Rect(self.x - self.radius, self.y - self.radius, self.radius * 2, self.radius * 2)
 
     def handle_input(self):
+        if self.is_stunned():
+            return
+
         keys = pygame.key.get_pressed()
         dx, dy = 0, 0
 
@@ -161,16 +205,40 @@ class SurvivorAI(Character):
         self.dx = 0
         self.dy = 0
         self.trap_timer = 0
+        self.windup_timer = 0
+        self.burst_cooldown = 0
 
-    def update(self, player_x, player_y):
+    def update(self, player_x, player_y, survivor_bursts):
+        if self.burst_cooldown > 0:
+            self.burst_cooldown -= 1
+
         # Freeze action loop if trapped
         if self.trap_timer > 0:
             self.trap_timer -= 1
             self.color = TRAPPED_COLOR
             return
 
-        self.color = AI_COLOR
         distance = math.hypot(self.x - player_x, self.y - player_y)
+
+        # Wind-up: stand still for 2 seconds, then spawn the burst
+        if self.windup_timer > 0:
+            self.windup_timer -= 1
+            self.color = SURVIVOR_WINDUP_COLOR
+            if self.windup_timer <= 0:
+                survivor_bursts.append(SurvivorBurst(self.x, self.y))
+                self.burst_cooldown = SURVIVOR_BURST_COOLDOWN_FRAMES
+            return
+
+        self.color = AI_COLOR
+
+        # 50% chance to start wind-up when close to the hunter
+        if (
+            distance <= SURVIVOR_BURST_CLOSE_RANGE
+            and self.burst_cooldown <= 0
+            and random.random() < SURVIVOR_BURST_CHANCE
+        ):
+            self.windup_timer = SURVIVOR_BURST_WINDUP_FRAMES
+            return
 
         # Always flee from the hunter (no detection range limit)
         if distance > 0:
@@ -191,6 +259,7 @@ player = Player(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
 survivors = [SurvivorAI(random.randint(50, SCREEN_WIDTH-50), random.randint(50, SCREEN_HEIGHT-50)) for _ in range(4)]
 active_hazards = []
 trap_projectiles = []
+survivor_bursts = []
 
 running = True
 font = pygame.font.SysFont(None, 36)
@@ -202,7 +271,7 @@ while running:
         if event.type == pygame.QUIT:
             running = False
 
-        if event.type == pygame.KEYDOWN:
+        if event.type == pygame.KEYDOWN and not player.is_stunned():
             # UP ARROW: Small hazard box in front that follows the player briefly
             if event.key == pygame.K_UP and player.hazard_cooldown <= 0:
                 hazard_zone = LingeringRectangle(player)
@@ -225,6 +294,14 @@ while running:
         if hazard.duration <= 0:
             active_hazards.remove(hazard)
 
+    # Process survivor counter-attack bursts
+    for burst in survivor_bursts[:]:
+        burst.update()
+        if burst.duration <= 0:
+            survivor_bursts.remove(burst)
+        elif burst.get_rect().colliderect(player.get_rect()) and not player.is_stunned():
+            player.stun_timer = PLAYER_STUN_FRAMES
+
     # Process trap flying physics
     for trap in trap_projectiles[:]:
         trap.update()
@@ -233,7 +310,7 @@ while running:
 
     # Process Survivor status and threat detection
     for survivor in survivors[:]:
-        survivor.update(player.x, player.y)
+        survivor.update(player.x, player.y, survivor_bursts)
 
         # Threat Check 1: Melee contact body collision
         dist_to_player = math.hypot(player.x - survivor.x, player.y - survivor.y)
@@ -260,11 +337,17 @@ while running:
     for hazard in active_hazards:
         hazard.draw(screen)
 
+    for burst in survivor_bursts:
+        burst.draw(screen)
+
     for trap in trap_projectiles:
         trap.draw(screen)
 
     # Render characters foreground-last
-    player.draw(screen)
+    if player.is_stunned():
+        pygame.draw.circle(screen, STUNNED_PLAYER_COLOR, (int(player.x), int(player.y)), player.radius)
+    else:
+        player.draw(screen)
     for survivor in survivors:
         survivor.draw(screen)
 
