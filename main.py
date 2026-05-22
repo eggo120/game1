@@ -9,6 +9,11 @@ pygame.init()
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 FPS = 60
+HAZARD_COOLDOWN_FRAMES = FPS * 2   # Up Arrow: 2 seconds
+TRAP_COOLDOWN_FRAMES = FPS * 5     # Spacebar: 5 seconds
+HAZARD_DURATION_FRAMES = FPS // 2  # Up Arrow hazard active: 0.5 seconds
+HAZARD_WIDTH = 75
+HAZARD_HEIGHT = 50
 
 # Colors (RGB)
 BG_COLOR = (30, 30, 30)
@@ -48,29 +53,40 @@ class TrapProjectile:
 
 
 class LingeringRectangle:
-    """A 150x100 rectangular hazard zone that lingers for 3 seconds (Up Arrow)"""
-    def __init__(self, player_x, player_y, dx, dy):
-        self.duration = 180  # 3 seconds at 60 FPS
+    """A 75x50 hazard in front of the player that follows them for 0.5 seconds (Up Arrow)"""
+    def __init__(self, player):
+        self.player = player
+        self.duration = HAZARD_DURATION_FRAMES
+        self.width = HAZARD_WIDTH
+        self.height = HAZARD_HEIGHT
+        self.top_left_x = 0
+        self.top_left_y = 0
+        self._sync_position()
 
-        # Orient the box based on the player's primary direction
+    def _orient_size(self, dx, dy):
         if abs(dy) > abs(dx):
-            self.width = 100
-            self.height = 150
+            return HAZARD_HEIGHT, HAZARD_WIDTH
+        return HAZARD_WIDTH, HAZARD_HEIGHT
+
+    def _sync_position(self):
+        dx, dy = self.player.last_dx, self.player.last_dy
+        length = math.hypot(dx, dy)
+        if length > 0:
+            dx /= length
+            dy /= length
         else:
-            self.width = 150
-            self.height = 100
+            dx, dy = 0, -1
 
-        # Push the zone to spawn directly in front of the player's perimeter
-        offset_distance = 55
-        self.center_x = player_x + (dx * offset_distance)
-        self.center_y = player_y + (dy * offset_distance)
-
-        # Top-left calculation needed for Pygame rect drawing
-        self.top_left_x = self.center_x - (self.width // 2)
-        self.top_left_y = self.center_y - (self.height // 2)
+        self.width, self.height = self._orient_size(dx, dy)
+        offset_distance = self.player.radius + max(self.width, self.height) // 2 + 8
+        center_x = self.player.x + dx * offset_distance
+        center_y = self.player.y + dy * offset_distance
+        self.top_left_x = center_x - (self.width // 2)
+        self.top_left_y = center_y - (self.height // 2)
 
     def update(self):
         self.duration -= 1
+        self._sync_position()
 
     def draw(self, surface):
         # Draw the solid zone
@@ -101,6 +117,14 @@ class Player(Character):
         super().__init__(x, y, PLAYER_COLOR, speed=4, radius=18)
         self.last_dx = 0
         self.last_dy = -1  # Default direction is looking up
+        self.hazard_cooldown = 0
+        self.trap_cooldown = 0
+
+    def tick_cooldowns(self):
+        if self.hazard_cooldown > 0:
+            self.hazard_cooldown -= 1
+        if self.trap_cooldown > 0:
+            self.trap_cooldown -= 1
 
     def handle_input(self):
         keys = pygame.key.get_pressed()
@@ -133,12 +157,9 @@ class Player(Character):
 class SurvivorAI(Character):
     """The 4 Weak Roles trying to avoid you"""
     def __init__(self, x, y):
-        super().__init__(x, y, AI_COLOR, speed=2.5, radius=12)
-        self.state = "WANDER"
-        self.change_dir_timer = 0
+        super().__init__(x, y, AI_COLOR, speed=3.5, radius=12)
         self.dx = 0
         self.dy = 0
-        self.detection_radius = 150
         self.trap_timer = 0
 
     def update(self, player_x, player_y):
@@ -151,28 +172,12 @@ class SurvivorAI(Character):
         self.color = AI_COLOR
         distance = math.hypot(self.x - player_x, self.y - player_y)
 
-        if distance < self.detection_radius:
-            self.state = "FLEE"
-        else:
-            self.state = "WANDER"
-
-        if self.state == "FLEE":
-            if distance > 0:
-                self.dx = (self.x - player_x) / distance
-                self.dy = (self.y - player_y) / distance
-            self.x += self.dx * self.speed
-            self.y += self.dy * self.speed
-        elif self.state == "WANDER":
-            if self.change_dir_timer <= 0:
-                angle = random.uniform(0, 2 * math.pi)
-                self.dx = math.cos(angle)
-                self.dy = math.sin(angle)
-                self.change_dir_timer = random.randint(30, 90)
-            else:
-                self.change_dir_timer -= 1
-
-            self.x += self.dx * (self.speed * 0.5)
-            self.y += self.dy * (self.speed * 0.5)
+        # Always flee from the hunter (no detection range limit)
+        if distance > 0:
+            self.dx = (self.x - player_x) / distance
+            self.dy = (self.y - player_y) / distance
+        self.x += self.dx * self.speed
+        self.y += self.dy * self.speed
 
         self.x = max(self.radius, min(SCREEN_WIDTH - self.radius, self.x))
         self.y = max(self.radius, min(SCREEN_HEIGHT - self.radius, self.y))
@@ -198,17 +203,20 @@ while running:
             running = False
 
         if event.type == pygame.KEYDOWN:
-            # UP ARROW: Drops a 150x100 lingering hazard box in front
-            if event.key == pygame.K_UP:
-                hazard_zone = LingeringRectangle(player.x, player.y, player.last_dx, player.last_dy)
+            # UP ARROW: Small hazard box in front that follows the player briefly
+            if event.key == pygame.K_UP and player.hazard_cooldown <= 0:
+                hazard_zone = LingeringRectangle(player)
                 active_hazards.append(hazard_zone)
+                player.hazard_cooldown = HAZARD_COOLDOWN_FRAMES
 
             # SPACEBAR: Shoots a freeze missile
-            if event.key == pygame.K_SPACE:
+            if event.key == pygame.K_SPACE and player.trap_cooldown <= 0:
                 projectile = TrapProjectile(player.x, player.y, player.last_dx, player.last_dy)
                 trap_projectiles.append(projectile)
+                player.trap_cooldown = TRAP_COOLDOWN_FRAMES
 
     # 2. Update System Logic
+    player.tick_cooldowns()
     player.handle_input()
 
     # Process hazard timelines
