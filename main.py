@@ -241,14 +241,34 @@ class SurvivorAI(Character):
             return
 
         # Always flee from the hunter (no detection range limit)
+        flee_x, flee_y = self.dx, self.dy
         if distance > 0:
-            self.dx = (self.x - player_x) / distance
-            self.dy = (self.y - player_y) / distance
-        self.x += self.dx * self.speed
-        self.y += self.dy * self.speed
+            flee_x = (self.x - player_x) / distance
+            flee_y = (self.y - player_y) / distance
+            self.dx, self.dy = flee_x, flee_y
 
-        self.x = max(self.radius, min(SCREEN_WIDTH - self.radius, self.x))
-        self.y = max(self.radius, min(SCREEN_HEIGHT - self.radius, self.y))
+        # Nudge away from walls so cornered survivors can slide along edges
+        margin = self.radius
+        wall_x, wall_y = 0.0, 0.0
+        if self.x <= margin:
+            wall_x += 1.0
+        if self.x >= SCREEN_WIDTH - margin:
+            wall_x -= 1.0
+        if self.y <= margin:
+            wall_y += 1.0
+        if self.y >= SCREEN_HEIGHT - margin:
+            wall_y -= 1.0
+
+        move_x = flee_x + wall_x
+        move_y = flee_y + wall_y
+        length = math.hypot(move_x, move_y)
+        if length > 0:
+            move_x = (move_x / length) * self.speed
+            move_y = (move_y / length) * self.speed
+
+        # Move each axis separately so one blocked wall still allows sliding
+        self.x = max(margin, min(SCREEN_WIDTH - margin, self.x + move_x))
+        self.y = max(margin, min(SCREEN_HEIGHT - margin, self.y + move_y))
 
     def get_rect(self):
         return pygame.Rect(self.x - self.radius, self.y - self.radius, self.radius * 2, self.radius * 2)
